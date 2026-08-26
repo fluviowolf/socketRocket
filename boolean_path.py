@@ -300,52 +300,58 @@ def subtract_mesh_components(blank_mesh, cutter_mesh):
 
 
 if __name__ == "__main__":
+
+	# 1 - Upload path and blank meshes
 	path_mesh = trimesh.load("path.stl")
 	if isinstance(path_mesh, trimesh.Scene):
 		path_mesh = path_mesh.dump(concatenate=True)
 	blank_mesh = trimesh.load("blank.stl")
 	if isinstance(blank_mesh, trimesh.Scene):
 		blank_mesh = blank_mesh.dump(concatenate=True)
+
+	# 2 - Remesh path and blank meshes
 	path_mesh = isotropic_remesh(path_mesh, "path_fine.stl", targetlen=1)
 	blank_mesh = isotropic_remesh(blank_mesh, "blank_fine.stl", targetlen=1)
 
-	show_mesh(path_mesh, "Loaded Mesh: path.stl", color="cornflowerblue")
-	show_mesh(blank_mesh, "Loaded Mesh: blank.stl", color="lightgray")
+	show_mesh(path_mesh, "Path Mesh", color="cornflowerblue")
+	show_mesh(blank_mesh, "Blank Mesh", color="lightgray")
 
-	result_mesh = robust_boolean_difference(blank_mesh, path_mesh)
-	if result_mesh is None or len(result_mesh.vertices) == 0:
+	# 3 - Boolean Difference (path - blank = envelop)
+	envelop_mesh = robust_boolean_difference(blank_mesh, path_mesh)
+	if envelop_mesh is None or len(envelop_mesh.vertices) == 0:
 		raise RuntimeError("Boolean difference produced an empty result mesh.")
-	result_mesh = cleanup_mesh(result_mesh)
+	envelop_mesh = cleanup_mesh(envelop_mesh)
 
-	show_mesh(result_mesh, "Boolean Difference Result: blank - path", color="lightgreen")
-	result_mesh.export("blank_minus_path.stl")
+	show_mesh(envelop_mesh, "Envelop Mesh (Path - Blank)", color="lightgreen")
+	envelop_mesh.export("envelop_path.stl")
 
+	# 4 - Voxelization of envelop mesh
 	voxel_pitch = 1.0
-	voxel_grid = result_mesh.voxelized(pitch=voxel_pitch).fill()
-	voxelized_result_mesh = voxel_grid.as_boxes()
+	voxel_grid = envelop_mesh.voxelized(pitch=voxel_pitch).fill()
+	envelop_voxel_mesh = voxel_grid.as_boxes()
 
 	# Preserve the result mesh dimensions after voxelization.
-	result_extents = result_mesh.extents
-	voxel_extents = voxelized_result_mesh.extents
+	result_extents = envelop_mesh.extents
+	voxel_extents = envelop_voxel_mesh.extents
 	scale_factors = np.divide(
 		result_extents,
 		voxel_extents,
 		out=np.ones_like(result_extents),
 		where=voxel_extents != 0,
 	)
-	voxelized_result_mesh.apply_scale(scale_factors)
-	result_center = result_mesh.bounds.mean(axis=0)
-	voxel_center = voxelized_result_mesh.bounds.mean(axis=0)
-	voxelized_result_mesh.apply_translation(result_center - voxel_center)
+	envelop_voxel_mesh.apply_scale(scale_factors)
+	result_center = envelop_mesh.bounds.mean(axis=0)
+	voxel_center = envelop_voxel_mesh.bounds.mean(axis=0)
+	envelop_voxel_mesh.apply_translation(result_center - voxel_center)
 
 	show_mesh(
-		voxelized_result_mesh,
-		"Voxelized Boolean Difference Result",
+		envelop_voxel_mesh,
+		"Voxelized Envelop",
 		color="limegreen",
 	)
-	voxelized_result_mesh.export("blank_minus_path_voxelized.stl")
+	envelop_voxel_mesh.export("envelop_voxel_mesh.stl")
 
-	# Dilate the filled voxel grid by 1 mm before converting it to boxes.
+	# 5 - Dilate Voxelized Envelop
 	dilation_mm = 1.0
 	dilation_radius = int(np.ceil(dilation_mm / voxel_pitch))
 	dilation_padding = dilation_radius + 1
@@ -367,104 +373,118 @@ if __name__ == "__main__":
 		dilated_matrix,
 		transform=dilated_transform,
 	)
-	dilated_voxelized_result_mesh = dilated_voxel_grid.as_boxes()
+	envelop_voxel_mesh_dilated = dilated_voxel_grid.as_boxes()
 
 	show_mesh(
-		dilated_voxelized_result_mesh,
-		"1 mm Dilated Voxelized Boolean Difference Result",
+		envelop_voxel_mesh_dilated,
+		"Dilated Voxelized Envelop",
 		color="darkgreen",
 	)
-	dilated_voxelized_result_mesh.export("blank_minus_path_voxelized_dilated_1mm.stl")
+	envelop_voxel_mesh_dilated.export("envelop_voxel_mesh_dilated.stl")
 
-	dilated_surface_mesh = cleanup_mesh(dilated_voxel_grid.marching_cubes)
-	voxel_object_center = dilated_voxelized_result_mesh.bounds.mean(axis=0)
-	surface_center = dilated_surface_mesh.bounds.mean(axis=0)
-	dilated_surface_mesh.apply_translation(voxel_object_center - surface_center)
+	# 6 - Convert Dilated Envelop Voxel Mesh to Surface Mesh
+	envelop_surface_mesh_dilated = cleanup_mesh(dilated_voxel_grid.marching_cubes)
+	voxel_object_center = envelop_voxel_mesh_dilated.bounds.mean(axis=0)
+	surface_center = envelop_surface_mesh_dilated.bounds.mean(axis=0)
+	envelop_surface_mesh_dilated.apply_translation(voxel_object_center - surface_center)
 	show_mesh(
-		dilated_surface_mesh,
+		envelop_surface_mesh_dilated,
 		"Surface Mesh from 1 mm Dilated Voxels",
 		color="seagreen",
 	)
-	dilated_surface_mesh.export("blank_minus_path_dilated_surface.stl")
+	envelop_surface_mesh_dilated.export("envelop_surface_mesh_dilated.stl")
 
-	smoothed_surface_mesh = dilated_surface_mesh.copy()
-	filter_laplacian(smoothed_surface_mesh, iterations=20)
-	smoothed_surface_mesh = cleanup_mesh(smoothed_surface_mesh)
+	# 7 - Smooth Envelop Surface Mesh
+	envelop_smooth_mesh = envelop_surface_mesh_dilated.copy()
+	filter_laplacian(envelop_smooth_mesh, iterations=20)
+	envelop_smooth_mesh = cleanup_mesh(envelop_smooth_mesh)
 	show_mesh(
-		smoothed_surface_mesh,
-		"Smoothed Surface Mesh from 1 mm Dilated Voxels",
+		envelop_smooth_mesh,
+		"Envelop Smooth",
 		color="mediumseagreen",
 	)
-	smoothed_surface_mesh.export("blank_minus_path_dilated_surface_smoothed.stl")
+	envelop_smooth_mesh.export("envelop_smooth_mesh.stl")
 
-	isotropically_remeshed_surface_mesh = isotropic_remesh(
-		smoothed_surface_mesh,
-		"blank_minus_path_dilated_surface_smoothed_remeshed.stl",
+	# 8 - Remeshed Envelop
+	envelop_remeshed = isotropic_remesh(
+		envelop_smooth_mesh,
+		"envelop_remeshed.stl",
 		targetlen=1.0,
 	)
-	isotropically_remeshed_surface_mesh = cleanup_mesh(
-		isotropically_remeshed_surface_mesh
+	envelop_remeshed = cleanup_mesh(
+		envelop_remeshed
 	)
-	isotropically_remeshed_surface_mesh.export(
-		"blank_minus_path_dilated_surface_smoothed_remeshed_cleaned.stl"
+	envelop_remeshed.export(
+		"envelop_remeshed.stl"
 	)
 	show_mesh(
-		isotropically_remeshed_surface_mesh,
-		"Isotropically Remeshed Smoothed Surface (1 mm)",
+		envelop_remeshed,
+		"Remeshed Envelop",
 		color="teal",
 	)
 
-	intersection_mesh = robust_boolean_intersection(
-		isotropically_remeshed_surface_mesh,
+	# 9 - Envelop Intersection
+	implant_core = robust_boolean_intersection(
+		envelop_remeshed,
 		path_mesh,
 	)
 	show_mesh(
-		intersection_mesh,
-		"Boolean Intersection with Remeshed path.stl",
+		implant_core,
+		"implant_core.stl",
 		color="tomato",
 	)
-	intersection_mesh.export("smoothed_remeshed_intersection_path.stl")
+	implant_core.export("implant_core.stl")
 
-	# dilated_result_mesh = voxel_offset_mesh(result_mesh, offset_mm=2.0, pitch_mm=0.5)
-	# show_mesh(dilated_result_mesh, "Dilated Boolean Difference Result (+2 mm)", color="limegreen")
-	# dilated_result_mesh.export("blank_minus_path_dilated.stl")
-	#
-	# hull_mesh = cleanup_mesh(sampled_convex_hull(dilated_result_mesh, count=50000))
-	# show_mesh(hull_mesh, "Convex Hull of blank - path", color="gold")
-	#
-	# hull_subdivided = subdivide_mesh(hull_mesh)
-	# show_mesh(hull_subdivided, "Subdivided Convex Hull", color="orange")
-	#
-	# hull_mesh = isotropic_remesh(hull_subdivided, "hull_fine.stl", targetlen=1)
-	# show_mesh(hull_mesh, "Isotropically Remeshed Convex Hull", color="red")
-	# hull_mesh.export("blank_minus_path_hull.stl")
+	# 10 - Implant Core Remesh
+	implant_core = isotropic_remesh(
+		implant_core,
+		"implant_core_remeshed.stl",
+		targetlen=1.0,
+	)
+	implant_core = cleanup_mesh(implant_core)
+	show_mesh(
+		implant_core,
+		"Remeshed Implant Core",
+		color="coral",
+	)
+	implant_core.export("implant_core_remeshed.stl")
 
-	# dilated_result_mesh = cleanup_mesh(dilated_result_mesh)
-	# dilated_result_mesh = isotropic_remesh(
-	#	dilated_result_mesh,
-	#	"blank_minus_path_dilated_fine.stl",
-	#	targetlen=0.5,
-	# )
-	# dilated_result_mesh = cleanup_mesh(dilated_result_mesh)
-	# show_mesh(
-	#	dilated_result_mesh,
-	#	"Cleaned and Remeshed Dilated Result (0.5 mm)",
-	#	color="darkgreen",
-	# )
-	#
-	# intersection_mesh = robust_boolean_intersection(path_mesh, dilated_result_mesh)
-	# show_mesh(
-	#	intersection_mesh,
-	#	"Boolean Intersection Result: path and convex hull(blank - path)",
-	#	color="tomato",
-	# )
-	#
-	# intersection_mesh.export("implant_core.stl")
-	#
-	# blank_components = subtract_mesh_components(blank_mesh, intersection_mesh)
-	# outer_blank_mesh, inner_blank_mesh = blank_components[:2]
-	# show_mesh(outer_blank_mesh, "Outer Blank", color="lightblue")
-	# show_mesh(inner_blank_mesh, "Inner Blank", color="lightgreen")
-	# outer_blank_mesh.export("outer_blank.stl")
-	# inner_blank_mesh.export("inner_blank.stl")
+	# 11 - Dilate Implant Core
+	implant_core_dilated = cleanup_mesh(
+		dilate_mesh(implant_core, offset_mm=1.0)
+	)
+	show_mesh(
+		implant_core_dilated,
+		"Dilated Implant Core",
+		color="crimson",
+	)
+	implant_core_dilated.export(
+		"smoothed_remeshed_intersection_path_dilated_1mm.stl"
+	)
+
+	# 12 - Final Outer and Inner Blanks
+	cut_result = blank_mesh.difference(implant_core_dilated, engine="manifold")
+	if cut_result is None or len(cut_result.vertices) == 0:
+		raise RuntimeError("Final boolean subtraction produced an empty result mesh.")
+	cut_components = [
+		cleanup_mesh(component)
+		for component in cut_result.split(only_watertight=False)
+	]
+	cut_components = [component for component in cut_components if len(component.vertices) > 0]
+	if len(cut_components) < 2:
+		raise RuntimeError(
+			f"Final boolean subtraction produced {len(cut_components)} blank part(s); "
+			"expected an outer and inner blank."
+		)
+
+	cut_components.sort(key=lambda component: component.area, reverse=True)
+	outer_blank = cut_components[0]
+	inner_blank = cut_components[-1]
+
+	show_mesh(outer_blank, "Outer Blank", color="lightblue")
+	outer_blank.export("outer_blank.stl")
+	show_mesh(inner_blank, "Inner Blank", color="lightgreen")
+	inner_blank.export("inner_blank.stl")
+
+
 
