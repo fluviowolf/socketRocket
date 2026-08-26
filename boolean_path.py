@@ -3,6 +3,7 @@ import subprocess
 import sys
 
 import numpy as np
+from trimesh.smoothing import filter_laplacian
 
 
 def ensure_pip_is_current():
@@ -300,7 +301,11 @@ def subtract_mesh_components(blank_mesh, cutter_mesh):
 
 if __name__ == "__main__":
 	path_mesh = trimesh.load("path.stl")
+	if isinstance(path_mesh, trimesh.Scene):
+		path_mesh = path_mesh.dump(concatenate=True)
 	blank_mesh = trimesh.load("blank.stl")
+	if isinstance(blank_mesh, trimesh.Scene):
+		blank_mesh = blank_mesh.dump(concatenate=True)
 	path_mesh = isotropic_remesh(path_mesh, "path_fine.stl", targetlen=1)
 	blank_mesh = isotropic_remesh(blank_mesh, "blank_fine.stl", targetlen=1)
 
@@ -315,10 +320,115 @@ if __name__ == "__main__":
 	show_mesh(result_mesh, "Boolean Difference Result: blank - path", color="lightgreen")
 	result_mesh.export("blank_minus_path.stl")
 
-	dilated_result_mesh = voxel_offset_mesh(result_mesh, offset_mm=2.0, pitch_mm=0.5)
-	show_mesh(dilated_result_mesh, "Dilated Boolean Difference Result (+2 mm)", color="limegreen")
-	dilated_result_mesh.export("blank_minus_path_dilated.stl")
+	voxel_pitch = 1.0
+	voxel_grid = result_mesh.voxelized(pitch=voxel_pitch).fill()
+	voxelized_result_mesh = voxel_grid.as_boxes()
 
+	# Preserve the result mesh dimensions after voxelization.
+	result_extents = result_mesh.extents
+	voxel_extents = voxelized_result_mesh.extents
+	scale_factors = np.divide(
+		result_extents,
+		voxel_extents,
+		out=np.ones_like(result_extents),
+		where=voxel_extents != 0,
+	)
+	voxelized_result_mesh.apply_scale(scale_factors)
+	result_center = result_mesh.bounds.mean(axis=0)
+	voxel_center = voxelized_result_mesh.bounds.mean(axis=0)
+	voxelized_result_mesh.apply_translation(result_center - voxel_center)
+
+	show_mesh(
+		voxelized_result_mesh,
+		"Voxelized Boolean Difference Result",
+		color="limegreen",
+	)
+	voxelized_result_mesh.export("blank_minus_path_voxelized.stl")
+
+	# Dilate the filled voxel grid by 1 mm before converting it to boxes.
+	dilation_mm = 1.0
+	dilation_radius = int(np.ceil(dilation_mm / voxel_pitch))
+	dilation_padding = dilation_radius + 1
+	dilated_matrix = np.pad(
+		voxel_grid.matrix,
+		dilation_padding,
+		mode="constant",
+	)
+	dilated_transform = voxel_grid.transform.copy()
+	dilated_transform[:3, 3] -= (
+		dilated_transform[:3, :3] @ np.full(3, dilation_padding)
+	)
+	distance = ndimage.distance_transform_edt(
+		~dilated_matrix,
+		sampling=voxel_pitch,
+	)
+	dilated_matrix |= distance <= dilation_mm
+	dilated_voxel_grid = trimesh.voxel.VoxelGrid(
+		dilated_matrix,
+		transform=dilated_transform,
+	)
+	dilated_voxelized_result_mesh = dilated_voxel_grid.as_boxes()
+
+	show_mesh(
+		dilated_voxelized_result_mesh,
+		"1 mm Dilated Voxelized Boolean Difference Result",
+		color="darkgreen",
+	)
+	dilated_voxelized_result_mesh.export("blank_minus_path_voxelized_dilated_1mm.stl")
+
+	dilated_surface_mesh = cleanup_mesh(dilated_voxel_grid.marching_cubes)
+	voxel_object_center = dilated_voxelized_result_mesh.bounds.mean(axis=0)
+	surface_center = dilated_surface_mesh.bounds.mean(axis=0)
+	dilated_surface_mesh.apply_translation(voxel_object_center - surface_center)
+	show_mesh(
+		dilated_surface_mesh,
+		"Surface Mesh from 1 mm Dilated Voxels",
+		color="seagreen",
+	)
+	dilated_surface_mesh.export("blank_minus_path_dilated_surface.stl")
+
+	smoothed_surface_mesh = dilated_surface_mesh.copy()
+	filter_laplacian(smoothed_surface_mesh, iterations=20)
+	smoothed_surface_mesh = cleanup_mesh(smoothed_surface_mesh)
+	show_mesh(
+		smoothed_surface_mesh,
+		"Smoothed Surface Mesh from 1 mm Dilated Voxels",
+		color="mediumseagreen",
+	)
+	smoothed_surface_mesh.export("blank_minus_path_dilated_surface_smoothed.stl")
+
+	isotropically_remeshed_surface_mesh = isotropic_remesh(
+		smoothed_surface_mesh,
+		"blank_minus_path_dilated_surface_smoothed_remeshed.stl",
+		targetlen=1.0,
+	)
+	isotropically_remeshed_surface_mesh = cleanup_mesh(
+		isotropically_remeshed_surface_mesh
+	)
+	isotropically_remeshed_surface_mesh.export(
+		"blank_minus_path_dilated_surface_smoothed_remeshed_cleaned.stl"
+	)
+	show_mesh(
+		isotropically_remeshed_surface_mesh,
+		"Isotropically Remeshed Smoothed Surface (1 mm)",
+		color="teal",
+	)
+
+	intersection_mesh = robust_boolean_intersection(
+		isotropically_remeshed_surface_mesh,
+		path_mesh,
+	)
+	show_mesh(
+		intersection_mesh,
+		"Boolean Intersection with Remeshed path.stl",
+		color="tomato",
+	)
+	intersection_mesh.export("smoothed_remeshed_intersection_path.stl")
+
+	# dilated_result_mesh = voxel_offset_mesh(result_mesh, offset_mm=2.0, pitch_mm=0.5)
+	# show_mesh(dilated_result_mesh, "Dilated Boolean Difference Result (+2 mm)", color="limegreen")
+	# dilated_result_mesh.export("blank_minus_path_dilated.stl")
+	#
 	# hull_mesh = cleanup_mesh(sampled_convex_hull(dilated_result_mesh, count=50000))
 	# show_mesh(hull_mesh, "Convex Hull of blank - path", color="gold")
 	#
@@ -329,36 +439,32 @@ if __name__ == "__main__":
 	# show_mesh(hull_mesh, "Isotropically Remeshed Convex Hull", color="red")
 	# hull_mesh.export("blank_minus_path_hull.stl")
 
-	dilated_result_mesh = cleanup_mesh(dilated_result_mesh)
-	dilated_result_mesh = isotropic_remesh(
-		dilated_result_mesh,
-		"blank_minus_path_dilated_fine.stl",
-		targetlen=0.5,
-	)
-	dilated_result_mesh = cleanup_mesh(dilated_result_mesh)
-	show_mesh(
-		dilated_result_mesh,
-		"Cleaned and Remeshed Dilated Result (0.5 mm)",
-		color="darkgreen",
-	)
-
-	intersection_mesh = robust_boolean_intersection(path_mesh, dilated_result_mesh)
-	show_mesh(
-		intersection_mesh,
-		"Boolean Intersection Result: path ∩ convex hull(blank - path)",
-		color="tomato",
-	)
-
-	intersection_mesh.export("implant_core.stl")
-	
-	#implant_core_offset = dilate_mesh(intersection_mesh, offset_mm=1.0)
-	#show_mesh(implant_core_offset, "1.0 mm Offset Implant Core", color="tomato")
-	#implant_core_offset.export("implant_core_offset.stl")
-
-	blank_components = subtract_mesh_components(blank_mesh, intersection_mesh)
-	outer_blank_mesh, inner_blank_mesh = blank_components[:2]
-	show_mesh(outer_blank_mesh, "Outer Blank", color="lightblue")
-	show_mesh(inner_blank_mesh, "Inner Blank", color="lightgreen")
-	outer_blank_mesh.export("outer_blank.stl")
-	inner_blank_mesh.export("inner_blank.stl")
+	# dilated_result_mesh = cleanup_mesh(dilated_result_mesh)
+	# dilated_result_mesh = isotropic_remesh(
+	#	dilated_result_mesh,
+	#	"blank_minus_path_dilated_fine.stl",
+	#	targetlen=0.5,
+	# )
+	# dilated_result_mesh = cleanup_mesh(dilated_result_mesh)
+	# show_mesh(
+	#	dilated_result_mesh,
+	#	"Cleaned and Remeshed Dilated Result (0.5 mm)",
+	#	color="darkgreen",
+	# )
+	#
+	# intersection_mesh = robust_boolean_intersection(path_mesh, dilated_result_mesh)
+	# show_mesh(
+	#	intersection_mesh,
+	#	"Boolean Intersection Result: path and convex hull(blank - path)",
+	#	color="tomato",
+	# )
+	#
+	# intersection_mesh.export("implant_core.stl")
+	#
+	# blank_components = subtract_mesh_components(blank_mesh, intersection_mesh)
+	# outer_blank_mesh, inner_blank_mesh = blank_components[:2]
+	# show_mesh(outer_blank_mesh, "Outer Blank", color="lightblue")
+	# show_mesh(inner_blank_mesh, "Inner Blank", color="lightgreen")
+	# outer_blank_mesh.export("outer_blank.stl")
+	# inner_blank_mesh.export("inner_blank.stl")
 
