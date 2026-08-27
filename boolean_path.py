@@ -37,6 +37,7 @@ def ensure_module(module_name, package_name=None):
 trimesh = ensure_module("trimesh")
 pv = ensure_module("pyvista")
 ensure_module("manifold3d")
+ensure_module("rtree")
 pymeshlab = ensure_module("pymeshlab")
 ndimage = ensure_module("scipy.ndimage", "scipy")
 
@@ -243,6 +244,19 @@ def robust_boolean_intersection(mesh_a, mesh_b):
 	return result
 
 
+def plane_cut_from_bottom(mesh, height_mm=10.0):
+	"""Cut the mesh with a horizontal plane height_mm above its lowest Z, keeping the upper portion."""
+	z_min = mesh.bounds[0, 2]
+	cut = mesh.slice_plane(
+		plane_origin=[0.0, 0.0, z_min + height_mm],
+		plane_normal=[0.0, 0.0, 1.0],
+		cap=True,
+	)
+	if cut is None or len(cut.vertices) == 0:
+		raise RuntimeError("Plane cut produced an empty result mesh.")
+	return cleanup_mesh(cut)
+
+
 def dilate_mesh(mesh, offset_mm=1.5):
 	"""Expand a watertight mesh by offset_mm using its vertex normals."""
 	dilated = mesh.copy()
@@ -309,14 +323,22 @@ if __name__ == "__main__":
 	if isinstance(blank_mesh, trimesh.Scene):
 		blank_mesh = blank_mesh.dump(concatenate=True)
 
-	# 2 - Remesh path and blank meshes
+	# 2 - Plane cut 10 mm from the bottom of the path and blank meshes
+	plane_cut_height_mm = 10.0
+	path_mesh = plane_cut_from_bottom(path_mesh, height_mm=plane_cut_height_mm)
+	blank_mesh = plane_cut_from_bottom(blank_mesh, height_mm=plane_cut_height_mm)
+
+	show_mesh(path_mesh, "Path Mesh (Plane Cut)", color="cornflowerblue")
+	show_mesh(blank_mesh, "Blank Mesh (Plane Cut)", color="lightgray")
+
+	# 3 - Remesh path and blank meshes
 	path_mesh = isotropic_remesh(path_mesh, "path_fine.stl", targetlen=1)
 	blank_mesh = isotropic_remesh(blank_mesh, "blank_fine.stl", targetlen=1)
 
 	show_mesh(path_mesh, "Path Mesh", color="cornflowerblue")
 	show_mesh(blank_mesh, "Blank Mesh", color="lightgray")
 
-	# 3 - Boolean Difference (path - blank = envelop)
+	# 4 - Boolean Difference (path - blank = envelop)
 	envelop_mesh = robust_boolean_difference(blank_mesh, path_mesh)
 	if envelop_mesh is None or len(envelop_mesh.vertices) == 0:
 		raise RuntimeError("Boolean difference produced an empty result mesh.")
@@ -325,7 +347,7 @@ if __name__ == "__main__":
 	show_mesh(envelop_mesh, "Envelop Mesh (Path - Blank)", color="lightgreen")
 	envelop_mesh.export("envelop_path.stl")
 
-	# 4 - Voxelization of envelop mesh
+	# 5 - Voxelization of envelop mesh
 	voxel_pitch = 1.0
 	voxel_grid = envelop_mesh.voxelized(pitch=voxel_pitch).fill()
 	envelop_voxel_mesh = voxel_grid.as_boxes()
@@ -351,51 +373,59 @@ if __name__ == "__main__":
 	)
 	envelop_voxel_mesh.export("envelop_voxel_mesh.stl")
 
-	# 5 - Dilate Voxelized Envelop
-	dilation_mm = 1.0
-	dilation_radius = int(np.ceil(dilation_mm / voxel_pitch))
-	dilation_padding = dilation_radius + 1
-	dilated_matrix = np.pad(
+	# 6 - Offset Voxelized Envelop (negative voxel_offset_mm erodes, positive dilates)
+	# 	- This whole section may be completely removed
+	voxel_offset_mm = 2.0
+	voxel_offset_radius = int(np.ceil(abs(voxel_offset_mm) / voxel_pitch))
+	voxel_offset_padding = voxel_offset_radius + 1
+	offset_matrix = np.pad(
 		voxel_grid.matrix,
-		dilation_padding,
+		voxel_offset_padding,
 		mode="constant",
 	)
-	dilated_transform = voxel_grid.transform.copy()
-	dilated_transform[:3, 3] -= (
-		dilated_transform[:3, :3] @ np.full(3, dilation_padding)
+	offset_transform = voxel_grid.transform.copy()
+	offset_transform[:3, 3] -= (
+		offset_transform[:3, :3] @ np.full(3, voxel_offset_padding)
 	)
-	distance = ndimage.distance_transform_edt(
-		~dilated_matrix,
-		sampling=voxel_pitch,
+	if voxel_offset_mm >= 0:
+		distance = ndimage.distance_transform_edt(
+			~offset_matrix,
+			sampling=voxel_pitch,
+		)
+		offset_matrix |= distance <= voxel_offset_mm
+	else:
+		distance = ndimage.distance_transform_edt(
+			offset_matrix,
+			sampling=voxel_pitch,
+		)
+		offset_matrix &= distance > abs(voxel_offset_mm)
+	offset_voxel_grid = trimesh.voxel.VoxelGrid(
+		offset_matrix,
+		transform=offset_transform,
 	)
-	dilated_matrix |= distance <= dilation_mm
-	dilated_voxel_grid = trimesh.voxel.VoxelGrid(
-		dilated_matrix,
-		transform=dilated_transform,
-	)
-	envelop_voxel_mesh_dilated = dilated_voxel_grid.as_boxes()
+	envelop_voxel_mesh_offset = offset_voxel_grid.as_boxes()
 
 	show_mesh(
-		envelop_voxel_mesh_dilated,
-		"Dilated Voxelized Envelop",
+		envelop_voxel_mesh_offset,
+		"Offset Voxelized Envelop",
 		color="darkgreen",
 	)
-	envelop_voxel_mesh_dilated.export("envelop_voxel_mesh_dilated.stl")
+	envelop_voxel_mesh_offset.export("envelop_voxel_mesh_offset.stl")
 
-	# 6 - Convert Dilated Envelop Voxel Mesh to Surface Mesh
-	envelop_surface_mesh_dilated = cleanup_mesh(dilated_voxel_grid.marching_cubes)
-	voxel_object_center = envelop_voxel_mesh_dilated.bounds.mean(axis=0)
-	surface_center = envelop_surface_mesh_dilated.bounds.mean(axis=0)
-	envelop_surface_mesh_dilated.apply_translation(voxel_object_center - surface_center)
+	# 7 - Convert Offset Envelop Voxel Mesh to Surface Mesh
+	envelop_surface_mesh_offset = cleanup_mesh(offset_voxel_grid.marching_cubes)
+	voxel_object_center = envelop_voxel_mesh_offset.bounds.mean(axis=0)
+	surface_center = envelop_surface_mesh_offset.bounds.mean(axis=0)
+	envelop_surface_mesh_offset.apply_translation(voxel_object_center - surface_center)
 	show_mesh(
-		envelop_surface_mesh_dilated,
-		"Surface Mesh from 1 mm Dilated Voxels",
+		envelop_surface_mesh_offset,
+		"Surface Mesh from 1 mm Offset Voxels",
 		color="seagreen",
 	)
-	envelop_surface_mesh_dilated.export("envelop_surface_mesh_dilated.stl")
+	envelop_surface_mesh_offset.export("envelop_surface_mesh_offset.stl")
 
-	# 7 - Smooth Envelop Surface Mesh
-	envelop_smooth_mesh = envelop_surface_mesh_dilated.copy()
+	# 8 - Smooth Envelop Surface Mesh
+	envelop_smooth_mesh = envelop_surface_mesh_offset.copy()
 	filter_laplacian(envelop_smooth_mesh, iterations=20)
 	envelop_smooth_mesh = cleanup_mesh(envelop_smooth_mesh)
 	show_mesh(
@@ -405,7 +435,7 @@ if __name__ == "__main__":
 	)
 	envelop_smooth_mesh.export("envelop_smooth_mesh.stl")
 
-	# 8 - Remeshed Envelop
+	# 9 - Remeshed Envelop
 	envelop_remeshed = isotropic_remesh(
 		envelop_smooth_mesh,
 		"envelop_remeshed.stl",
@@ -423,7 +453,7 @@ if __name__ == "__main__":
 		color="teal",
 	)
 
-	# 9 - Envelop Intersection
+	# 10 - Envelop Intersection
 	implant_core = robust_boolean_intersection(
 		envelop_remeshed,
 		path_mesh,
@@ -435,7 +465,7 @@ if __name__ == "__main__":
 	)
 	implant_core.export("implant_core.stl")
 
-	# 10 - Implant Core Remesh
+	# 11 - Implant Core Remesh
 	implant_core = isotropic_remesh(
 		implant_core,
 		"implant_core_remeshed.stl",
@@ -449,7 +479,7 @@ if __name__ == "__main__":
 	)
 	implant_core.export("implant_core_remeshed.stl")
 
-	# 11 - Dilate Implant Core
+	# 12 - Dilate Implant Core
 	implant_core_dilated = cleanup_mesh(
 		dilate_mesh(implant_core, offset_mm=1.0)
 	)
@@ -459,10 +489,22 @@ if __name__ == "__main__":
 		color="crimson",
 	)
 	implant_core_dilated.export(
-		"smoothed_remeshed_intersection_path_dilated_1mm.stl"
+		"implant_core_dilated.stl"
 	)
 
-	# 12 - Final Outer and Inner Blanks
+	# 13 - Trim Dilated Implant Core to Blank
+	implant_core_trimmed = robust_boolean_intersection(
+		implant_core_dilated,
+		blank_mesh,
+	)
+	show_mesh(
+		implant_core_trimmed,
+		"implant_core_trimmed.stl",
+		color="orange",
+	)
+	implant_core_trimmed.export("implant_core_trimmed.stl")
+
+	# 14 - Final Outer and Inner Blanks
 	cut_result = blank_mesh.difference(implant_core_dilated, engine="manifold")
 	if cut_result is None or len(cut_result.vertices) == 0:
 		raise RuntimeError("Final boolean subtraction produced an empty result mesh.")
@@ -485,6 +527,3 @@ if __name__ == "__main__":
 	outer_blank.export("outer_blank.stl")
 	show_mesh(inner_blank, "Inner Blank", color="lightgreen")
 	inner_blank.export("inner_blank.stl")
-
-
-
