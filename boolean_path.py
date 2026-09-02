@@ -375,9 +375,9 @@ if __name__ == "__main__":
 
 	# 6 - Offset Voxelized Envelop (negative voxel_offset_mm erodes, positive dilates)
 	# 	- This whole section may be completely removed
-	voxel_offset_mm = 2.0
+	voxel_offset_mm = 1.0
 	voxel_offset_radius = int(np.ceil(abs(voxel_offset_mm) / voxel_pitch))
-	voxel_offset_padding = voxel_offset_radius + 1
+	voxel_offset_padding = voxel_offset_radius
 	offset_matrix = np.pad(
 		voxel_grid.matrix,
 		voxel_offset_padding,
@@ -426,7 +426,7 @@ if __name__ == "__main__":
 
 	# 8 - Smooth Envelop Surface Mesh
 	envelop_smooth_mesh = envelop_surface_mesh_offset.copy()
-	filter_laplacian(envelop_smooth_mesh, iterations=20)
+	filter_laplacian(envelop_smooth_mesh, iterations=10)
 	envelop_smooth_mesh = cleanup_mesh(envelop_smooth_mesh)
 	show_mesh(
 		envelop_smooth_mesh,
@@ -439,7 +439,7 @@ if __name__ == "__main__":
 	envelop_remeshed = isotropic_remesh(
 		envelop_smooth_mesh,
 		"envelop_remeshed.stl",
-		targetlen=1.0,
+		targetlen=0.50,
 	)
 	envelop_remeshed = cleanup_mesh(
 		envelop_remeshed
@@ -469,7 +469,7 @@ if __name__ == "__main__":
 	implant_core = isotropic_remesh(
 		implant_core,
 		"implant_core_remeshed.stl",
-		targetlen=1.0,
+		targetlen=0.50,
 	)
 	implant_core = cleanup_mesh(implant_core)
 	show_mesh(
@@ -481,7 +481,7 @@ if __name__ == "__main__":
 
 	# 12 - Dilate Implant Core
 	implant_core_dilated = cleanup_mesh(
-		dilate_mesh(implant_core, offset_mm=1.0)
+		dilate_mesh(implant_core, offset_mm=0.5)
 	)
 	show_mesh(
 		implant_core_dilated,
