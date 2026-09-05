@@ -227,7 +227,7 @@ def isotropic_remesh(mesh, finemesh_path, targetlen=1.0):
 	)
 
 	# Save the remeshed result
-	ms.save_current_mesh(finemesh_path)
+	# ms.save_current_mesh(finemesh_path)
 	finemesh = ms.current_mesh()
 	return trimesh.Trimesh(
 			vertices=finemesh.vertex_matrix(),
@@ -367,156 +367,155 @@ def robust_boolean_intersection(mesh_a, mesh_b):
 def main():
 
     # 1. Upload Path and Blank Mesh Files
-    path_mesh = trimesh.load("path.stl")
-    if isinstance(path_mesh, trimesh.Scene):
-        path_mesh = path_mesh.dump(concatenate=True)
-    blank_mesh = trimesh.load("blank.stl")
-    if isinstance(blank_mesh, trimesh.Scene):
-        blank_mesh = blank_mesh.dump(concatenate=True)
+	input_dir = os.path.join(os.getcwd(), "input")
+	output_dir = os.path.join(os.getcwd(), "output")
+	os.makedirs(output_dir, exist_ok=True)
+	path_mesh = trimesh.load(os.path.join(input_dir, "path.stl"))
+	blank_mesh = trimesh.load(os.path.join(input_dir, "blank.stl"))
 
     # 2. Plane cut 10 mm from the bottom of the path and blank meshes
-    plane_cut_height_mm = 10.0
-    path_mesh = plane_cut_from_bottom(path_mesh, height_mm=plane_cut_height_mm)
-    blank_mesh = plane_cut_from_bottom(blank_mesh, height_mm=plane_cut_height_mm)
+	plane_cut_height_mm = 10.0
+	path_mesh = plane_cut_from_bottom(path_mesh, height_mm=plane_cut_height_mm)
+	blank_mesh = plane_cut_from_bottom(blank_mesh, height_mm=plane_cut_height_mm)
 
-    show_mesh(path_mesh, "Path Mesh (Plane Cut)", color="cornflowerblue")
-    show_mesh(blank_mesh, "Blank Mesh (Plane Cut)", color="lightgray")
+	show_mesh(path_mesh, "Path Mesh (Plane Cut)", color="cornflowerblue")
+	show_mesh(blank_mesh, "Blank Mesh (Plane Cut)", color="lightgray")
 
     # 3 - Remesh path and blank meshes
-    path_fine = isotropic_remesh(path_mesh, "path_fine.stl", targetlen=1)
-    blank_fine = isotropic_remesh(blank_mesh, "blank_fine.stl", targetlen=1)
+	path_fine = isotropic_remesh(path_mesh, os.path.join(output_dir, "path_fine.stl"), targetlen=1)
+	blank_fine = isotropic_remesh(blank_mesh, os.path.join(output_dir, "blank_fine.stl"), targetlen=1)
 
-    show_mesh(path_fine, "Path Mesh", color="cornflowerblue")
-    show_mesh(blank_fine, "Blank Mesh", color="lightgray")
+	show_mesh(path_fine, "Path Mesh", color="cornflowerblue")
+	show_mesh(blank_fine, "Blank Mesh", color="lightgray")
 
-    # 4 - Boolean Difference (path - blank = envelop)
-    envelop_mesh = robust_boolean_difference(blank_fine, path_fine)
-    if envelop_mesh is None or len(envelop_mesh.vertices) == 0:
-        raise RuntimeError("Boolean difference produced an empty result mesh.")
-    envelop_mesh = cleanup_mesh(envelop_mesh)
-    show_mesh(envelop_mesh, "Envelop Mesh (Path - Blank)", color="lightgreen")
-    envelop_mesh.export("envelop.stl")
+	# 4 - Boolean Difference (path - blank = envelop)
+	envelop_mesh = robust_boolean_difference(blank_fine, path_fine)
+	if envelop_mesh is None or len(envelop_mesh.vertices) == 0:
+		raise RuntimeError("Boolean difference produced an empty result mesh.")
+	envelop_mesh = cleanup_mesh(envelop_mesh)
+	show_mesh(envelop_mesh, "Envelop Mesh (Path - Blank)", color="lightgreen")
+	# envelop_mesh.export(os.path.join(output_dir, "envelop.stl"))
 
-    # 7. Generate Convex Hull and Eroded Convex Hull
-    hull = envelop_mesh.convex_hull
-    eroded_hull = scale_hull_xy(hull, offset=2.0)
+	# 7. Generate Convex Hull and Eroded Convex Hull
+	hull = envelop_mesh.convex_hull
+	eroded_hull = scale_hull_xy(hull, offset=2.0)
 
-    show_meshes_overlay(
-        [
-            (path_fine, "lightblue", 0.3),
+	show_meshes_overlay(
+		[
+			(path_fine, "lightblue", 0.3),
 			(hull, "lightgreen", 0.3),
-            (eroded_hull, "darkorange", 1.0),
-        ],
-        "Convex Hull and Eroded/Scaled Hull",
-    )
+			(eroded_hull, "darkorange", 1.0),
+		],
+		"Convex Hull and Eroded/Scaled Hull",
+	)
 
-    hull_output_path = "hull.stl"
-    eroded_hull_output_path = "hull_eroded.stl"
-    hull.export(hull_output_path)
-    eroded_hull.export(eroded_hull_output_path)
-    print(f"Eroded convex hull exported to: {eroded_hull_output_path}")
+	hull_output_path = os.path.join(output_dir, "hull.stl")
+	eroded_hull_output_path = os.path.join(output_dir, "hull_eroded.stl")
+	# hull.export(hull_output_path)
+	# eroded_hull.export(eroded_hull_output_path)
+	# print(f"Eroded convex hull exported to: {eroded_hull_output_path}")
 
-    # 8. Boolean Subtraction of Path - Eroded Hull
-    eroded_difference_result = path_fine.difference(eroded_hull, engine="manifold")
+	# 8. Boolean Subtraction of Path - Eroded Hull
+	eroded_difference_result = path_fine.difference(eroded_hull, engine="manifold")
 
-    # Display the eroded subtraction result
-    show_mesh(
-        eroded_difference_result,
-        "Path Minus Eroded/Scaled Hull",
-        color="lightgreen",
-    )
+	# Display the eroded subtraction result
+	show_mesh(
+		eroded_difference_result,
+		"Path Minus Eroded/Scaled Hull",
+		color="lightgreen",
+	)
 
-    # Export the eroded subtraction result
-    eroded_difference_output_path = "path_fine_minus_eroded_hull.stl"
-    eroded_difference_result.export(eroded_difference_output_path)
-    print(f"Eroded boolean difference exported to: {eroded_difference_output_path}")
+	# Export the eroded subtraction result
+	eroded_difference_output_path = os.path.join(output_dir, "path_fine_minus_eroded_hull.stl")
+	# eroded_difference_result.export(eroded_difference_output_path)
+	# print(f"Eroded boolean difference exported to: {eroded_difference_output_path}")
 
-    # 9. Boolean Intersection of Path and Eroded Hull
-    eroded_intersection_result = path_fine.intersection(eroded_hull, engine="manifold")
+	# 9. Boolean Intersection of Path and Eroded Hull
+	eroded_intersection_result = path_fine.intersection(eroded_hull, engine="manifold")
 
-    # Remove isolated islands, keeping only the largest component
-    eroded_intersection_result, _ = keep_largest_component(eroded_intersection_result)
+	# Remove isolated islands, keeping only the largest component
+	eroded_intersection_result, _ = keep_largest_component(eroded_intersection_result)
 
-    # Display the eroded intersection result
-    show_mesh(
-        eroded_intersection_result,
-        "Implant Core",
-        color="darkorange",
-    )
+	# Display the eroded intersection result
+	show_mesh(
+		eroded_intersection_result,
+		"Implant Core",
+		color="darkorange",
+	)
 
-    # Export the eroded intersection result
-    eroded_intersection_output_path = "implant_core.stl"
-    eroded_intersection_result.export(eroded_intersection_output_path)
-    print(f"Eroded boolean intersection exported to: {eroded_intersection_output_path}")
+	# Export the eroded intersection result
+	eroded_intersection_output_path = os.path.join(output_dir, "implant_core.stl")
+	# eroded_intersection_result.export(eroded_intersection_output_path)
+	# print(f"Eroded boolean intersection exported to: {eroded_intersection_output_path}")
 
-    # 10. Isotropic Remesh of Implant Core
-    remeshed_intersection_result = remesh_uniform(eroded_intersection_result, target_len=0.20)
+	# 10. Isotropic Remesh of Implant Core
+	remeshed_intersection_result = remesh_uniform(eroded_intersection_result, target_len=0.20)
 
-    # Display the remeshed mesh overlaid on the original path_fine mesh
-    show_meshes_overlay(
-        [
-            (path_fine, "lightblue", 0.3),
-            (remeshed_intersection_result, "darkorange", 1.0),
-        ],
-        "Remeshed Implant Core over Path",
-    )
+	# Display the remeshed mesh overlaid on the original path_fine mesh
+	show_meshes_overlay(
+		[
+			(path_fine, "lightblue", 0.3),
+			(remeshed_intersection_result, "darkorange", 1.0),
+		],
+		"Remeshed Implant Core over Path",
+	)
 
-    remeshed_intersection_output_path = "implant_core_remeshed.stl"
-    remeshed_intersection_result.export(remeshed_intersection_output_path)
+	remeshed_intersection_output_path = os.path.join(output_dir, "implant_core_remeshed.stl")
+	# remeshed_intersection_result.export(remeshed_intersection_output_path)
 
-    # 10. Voxel Conversion of Implant Core
-    voxel_dilated_result = voxel_dilate_mesh(remeshed_intersection_result, offset_mm=1.00)
+	# 10. Voxel Conversion of Implant Core
+	voxel_dilated_result = voxel_dilate_mesh(remeshed_intersection_result, offset_mm=1.00)
 
-    #voxel_dilated_output_path = "implant_core_dilated.stl"
-    #voxel_dilated_result.export(voxel_dilated_output_path)
-	
-    # 11. Convert Voxelized Volume back to Mesh
-    mesh_from_voxel_result = voxel_to_mesh(voxel_dilated_result)
+	#voxel_dilated_output_path = "implant_core_dilated.stl"
+	#voxel_dilated_result.export(voxel_dilated_output_path)
 
-    # Display the voxelized mesh overlaid on the original path_fine mesh
-    show_meshes_overlay(
-        [
-            (path_fine, "lightblue", 0.3),
-            (mesh_from_voxel_result, "darkorange", 1.0),
-        ],
-        "Mesh Implant Core over Path",
-    )
+	# 11. Convert Voxelized Volume back to Mesh
+	mesh_from_voxel_result = voxel_to_mesh(voxel_dilated_result)
 
-    # 12. Smooth Mesh
-    smooth_mesh_result = filter_laplacian(mesh_from_voxel_result, iterations=20)
+	# Display the voxelized mesh overlaid on the original path_fine mesh
+	show_meshes_overlay(
+		[
+			(path_fine, "lightblue", 0.3),
+			(mesh_from_voxel_result, "darkorange", 1.0),
+		],
+		"Mesh Implant Core over Path",
+	)
 
-    # Display the smoothed mesh overlaid on the original path_fine mesh
-    show_meshes_overlay(
-        [
-            (path_fine, "lightblue", 0.3),
-            (smooth_mesh_result, "darkorange", 1.0),
-        ],
-        "Smooth Implant Core over Path",
-    )
+	# 12. Smooth Mesh
+	smooth_mesh_result = filter_laplacian(mesh_from_voxel_result, iterations=20)
 
-    smooth_mesh_output_path = "implant_core_smooth.stl"
-    smooth_mesh_result.export(smooth_mesh_output_path)
+	# Display the smoothed mesh overlaid on the original path_fine mesh
+	show_meshes_overlay(
+		[
+			(path_fine, "lightblue", 0.3),
+			(smooth_mesh_result, "darkorange", 1.0),
+		],
+		"Smooth Implant Core over Path",
+	)
 
-    outer_puck = blank_fine.difference(envelop_mesh, engine="manifold")
-    outer_puck = outer_puck.difference(smooth_mesh_result, engine="manifold")
-    inner_puck = envelop_mesh.difference(smooth_mesh_result, engine="manifold")
+	smooth_mesh_output_path = os.path.join(output_dir, "implant_core_smooth.stl")
+	# smooth_mesh_result.export(smooth_mesh_output_path)
 
-    show_meshes_overlay(
-            [
-                (outer_puck, "lightblue", 0.5),
-                (inner_puck, "lightgreen", 0.2),
-                (smooth_mesh_result, "darkorange", 1.0),
-            ],
-            "Final",
-    )
+	outer_puck = blank_fine.difference(envelop_mesh, engine="manifold")
+	outer_puck = outer_puck.difference(smooth_mesh_result, engine="manifold")
+	inner_puck = envelop_mesh.difference(smooth_mesh_result, engine="manifold")
 
-    outer_puck_output_path = "outer_puck.stl"
-    inner_puck_output_path = "inner_puck.stl"
-    implant_envelop_output_path = "implant_envelop.stl"
-    outer_puck.export(outer_puck_output_path)
-    inner_puck.export(inner_puck_output_path)
-    smooth_mesh_result.export(implant_envelop_output_path)
+	show_meshes_overlay(
+			[
+				(outer_puck, "lightblue", 0.5),
+				(inner_puck, "lightgreen", 0.2),
+				(smooth_mesh_result, "darkorange", 1.0),
+			],
+			"Final",
+	)
+
+	outer_puck_output_path = os.path.join(output_dir, "outer_puck.stl")
+	inner_puck_output_path = os.path.join(output_dir, "inner_puck.stl")
+	implant_envelop_output_path = os.path.join(output_dir, "implant_envelop.stl")
+	outer_puck.export(outer_puck_output_path)
+	inner_puck.export(inner_puck_output_path)
+	smooth_mesh_result.export(implant_envelop_output_path)
 
 
 if __name__ == "__main__":
-    main()
+	main()
