@@ -152,7 +152,6 @@ def scale_hull_xy(mesh, offset=1.0):
 	center_xy = (bounds[1, :2] + bounds[0, :2]) / 2.0
 	vertices[:, :2] = (vertices[:, :2] - center_xy) * scale_xy + center_xy
 	scaled.vertices = vertices
-	print(scaled)
 	return scaled
 
 
@@ -364,7 +363,7 @@ def robust_boolean_intersection(mesh_a, mesh_b):
 
 	return result
 
-def main():
+if __name__ == "__main__":
 
     # 1. Upload Path and Blank Mesh Files
 	input_dir = os.path.join(os.getcwd(), "input")
@@ -372,21 +371,24 @@ def main():
 	os.makedirs(output_dir, exist_ok=True)
 	path_mesh = trimesh.load(os.path.join(input_dir, "path.stl"))
 	blank_mesh = trimesh.load(os.path.join(input_dir, "blank.stl"))
+	print("[1] Imported path and blank files")
 
     # 2. Plane cut 10 mm from the bottom of the path and blank meshes
 	plane_cut_height_mm = 10.0
 	path_mesh = plane_cut_from_bottom(path_mesh, height_mm=plane_cut_height_mm)
 	blank_mesh = plane_cut_from_bottom(blank_mesh, height_mm=plane_cut_height_mm)
 
-	show_mesh(path_mesh, "Path Mesh (Plane Cut)", color="cornflowerblue")
-	show_mesh(blank_mesh, "Blank Mesh (Plane Cut)", color="lightgray")
+	# show_mesh(path_mesh, "Path Mesh (Plane Cut)", color="cornflowerblue")
+	# show_mesh(blank_mesh, "Blank Mesh (Plane Cut)", color="lightgray")
+	print("[2] Reduced input path and blank by 10 mm")
 
     # 3 - Remesh path and blank meshes
 	path_fine = isotropic_remesh(path_mesh, os.path.join(output_dir, "path_fine.stl"), targetlen=1)
 	blank_fine = isotropic_remesh(blank_mesh, os.path.join(output_dir, "blank_fine.stl"), targetlen=1)
 
-	show_mesh(path_fine, "Path Mesh", color="cornflowerblue")
-	show_mesh(blank_fine, "Blank Mesh", color="lightgray")
+	# show_mesh(path_fine, "Path Mesh", color="cornflowerblue")
+	# show_mesh(blank_fine, "Blank Mesh", color="lightgray")
+	print("[3] Remeshed path and blank mesh files")
 
 	# 4 - Boolean Difference (path - blank = envelop)
 	envelop_mesh = robust_boolean_difference(blank_fine, path_fine)
@@ -395,8 +397,9 @@ def main():
 	envelop_mesh = cleanup_mesh(envelop_mesh)
 	show_mesh(envelop_mesh, "Envelop Mesh (Path - Blank)", color="lightgreen")
 	# envelop_mesh.export(os.path.join(output_dir, "envelop.stl"))
+	print("[4] Generated envelop mesh (path - blank = envelop)")
 
-	# 7. Generate Convex Hull and Eroded Convex Hull
+	# 5. Generate Convex Hull and Eroded Convex Hull
 	hull = envelop_mesh.convex_hull
 	eroded_hull = scale_hull_xy(hull, offset=2.0)
 
@@ -413,9 +416,9 @@ def main():
 	eroded_hull_output_path = os.path.join(output_dir, "hull_eroded.stl")
 	# hull.export(hull_output_path)
 	# eroded_hull.export(eroded_hull_output_path)
-	# print(f"Eroded convex hull exported to: {eroded_hull_output_path}")
+	print("[5] Generated convex hull from envelop and eroded convel hull")
 
-	# 8. Boolean Subtraction of Path - Eroded Hull
+	# 6. Boolean Subtraction of Path - Eroded Hull
 	eroded_difference_result = path_fine.difference(eroded_hull, engine="manifold")
 
 	# Display the eroded subtraction result
@@ -424,13 +427,14 @@ def main():
 		"Path Minus Eroded/Scaled Hull",
 		color="lightgreen",
 	)
+	print("[6] Subtracted eroded convex hull from remeshed path file")
 
 	# Export the eroded subtraction result
 	eroded_difference_output_path = os.path.join(output_dir, "path_fine_minus_eroded_hull.stl")
 	# eroded_difference_result.export(eroded_difference_output_path)
 	# print(f"Eroded boolean difference exported to: {eroded_difference_output_path}")
 
-	# 9. Boolean Intersection of Path and Eroded Hull
+	# 7. Boolean Intersection of Path and Eroded Hull
 	eroded_intersection_result = path_fine.intersection(eroded_hull, engine="manifold")
 
 	# Remove isolated islands, keeping only the largest component
@@ -442,13 +446,14 @@ def main():
 		"Implant Core",
 		color="darkorange",
 	)
+	print("[7] Determined the intersection geometry between the eroded convex hull and the remeshed path file")
 
 	# Export the eroded intersection result
 	eroded_intersection_output_path = os.path.join(output_dir, "implant_core.stl")
 	# eroded_intersection_result.export(eroded_intersection_output_path)
 	# print(f"Eroded boolean intersection exported to: {eroded_intersection_output_path}")
 
-	# 10. Isotropic Remesh of Implant Core
+	# 8. Isotropic Remesh of Implant Core
 	remeshed_intersection_result = remesh_uniform(eroded_intersection_result, target_len=0.20)
 
 	# Display the remeshed mesh overlaid on the original path_fine mesh
@@ -462,26 +467,30 @@ def main():
 
 	remeshed_intersection_output_path = os.path.join(output_dir, "implant_core_remeshed.stl")
 	# remeshed_intersection_result.export(remeshed_intersection_output_path)
+	print("[8] Remeshed the intersection result or the implant/target mesh")
 
-	# 10. Voxel Conversion of Implant Core
+	# 9. Voxel Conversion of Implant Core
 	voxel_dilated_result = voxel_dilate_mesh(remeshed_intersection_result, offset_mm=1.00)
 
 	#voxel_dilated_output_path = "implant_core_dilated.stl"
 	#voxel_dilated_result.export(voxel_dilated_output_path)
+	print("[9] Voxelized and dilated implant/target mesh")
 
-	# 11. Convert Voxelized Volume back to Mesh
+	# 10. Convert Voxelized Volume back to Mesh
 	mesh_from_voxel_result = voxel_to_mesh(voxel_dilated_result)
 
 	# Display the voxelized mesh overlaid on the original path_fine mesh
-	show_meshes_overlay(
-		[
-			(path_fine, "lightblue", 0.3),
-			(mesh_from_voxel_result, "darkorange", 1.0),
-		],
-		"Mesh Implant Core over Path",
-	)
+	#show_meshes_overlay(
+	#	[
+	#		(path_fine, "lightblue", 0.3),
+	#		(mesh_from_voxel_result, "darkorange", 1.0),
+	#	],
+	#	"Mesh Implant Core over Path",
+	#)
 
-	# 12. Smooth Mesh
+	print("[10] Converted dilated voxelized implant/target to mesh")
+
+	# 11. Smooth Mesh
 	smooth_mesh_result = filter_laplacian(mesh_from_voxel_result, iterations=20)
 
 	# Display the smoothed mesh overlaid on the original path_fine mesh
@@ -495,7 +504,9 @@ def main():
 
 	smooth_mesh_output_path = os.path.join(output_dir, "implant_core_smooth.stl")
 	# smooth_mesh_result.export(smooth_mesh_output_path)
+	print("[11] Laplacian smoothing of implant/target mesh")
 
+	# 12. Final Boolean
 	outer_puck = blank_fine.difference(envelop_mesh, engine="manifold")
 	outer_puck = outer_puck.difference(smooth_mesh_result, engine="manifold")
 	inner_puck = envelop_mesh.difference(smooth_mesh_result, engine="manifold")
@@ -508,6 +519,7 @@ def main():
 			],
 			"Final",
 	)
+	print("[12] Generated outer and inner puck mesh files from blank")
 
 	outer_puck_output_path = os.path.join(output_dir, "outer_puck.stl")
 	inner_puck_output_path = os.path.join(output_dir, "inner_puck.stl")
@@ -516,6 +528,3 @@ def main():
 	inner_puck.export(inner_puck_output_path)
 	smooth_mesh_result.export(implant_envelop_output_path)
 
-
-if __name__ == "__main__":
-	main()
