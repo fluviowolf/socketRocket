@@ -2,6 +2,8 @@ import importlib
 import os
 import subprocess
 import sys
+import threading
+import time
 from collections import Counter
 
 import numpy as np
@@ -42,6 +44,38 @@ ensure_module("manifold3d")
 ensure_module("rtree")
 pymeshlab = ensure_module("pymeshlab")
 ndimage = ensure_module("scipy.ndimage", "scipy")
+
+
+def run_with_progress(operation, label, width=30):
+	"""Run a blocking operation while showing an indeterminate terminal progress bar."""
+	result = []
+	error = []
+	finished = threading.Event()
+
+	def worker():
+		try:
+			result.append(operation())
+		except BaseException as exc:
+			error.append(exc)
+		finally:
+			finished.set()
+
+	worker_thread = threading.Thread(target=worker)
+	worker_thread.start()
+	position = 0
+	while not finished.wait(0.1):
+		bar = ["-"] * width
+		bar[position % width] = "="
+		sys.stdout.write(f"\r{label} [{''.join(bar)}]")
+		sys.stdout.flush()
+		position += 1
+
+	worker_thread.join()
+	sys.stdout.write("\r" + (" " * (len(label) + width + 3)) + "\r")
+	sys.stdout.flush()
+	if error:
+		raise error[0]
+	return result[0]
 
 
 def trimesh_to_pyvista(mesh):
@@ -392,11 +426,17 @@ if __name__ == "__main__":
 		print("[2] Skipped 10 mm plane cut for symmetric part")
 
     # 3 - Remesh path and blank meshes
-	path_fine = isotropic_remesh(path_mesh, os.path.join(output_dir, "path_fine.stl"), targetlen=1)
-	blank_fine = isotropic_remesh(blank_mesh, os.path.join(output_dir, "blank_fine.stl"), targetlen=1)
+	path_fine = run_with_progress(
+		lambda: isotropic_remesh(path_mesh, os.path.join(output_dir, "path_fine.stl"), 0.5),
+		"Remeshing path",
+	)
+	blank_fine = run_with_progress(
+		lambda: isotropic_remesh(blank_mesh, os.path.join(output_dir, "blank_fine.stl"), 1),
+		"Remeshing blank",
+	)
 
-	# show_mesh(path_fine, "Path Mesh", color="cornflowerblue")
-	# show_mesh(blank_fine, "Blank Mesh", color="lightgray")
+	show_mesh(path_fine, "Path Mesh", color="cornflowerblue")
+	show_mesh(blank_fine, "Blank Mesh", color="lightgray")
 	print("[3] Remeshed path and blank mesh files")
 
 	# 4 - Boolean Difference (path - blank = envelop)
@@ -410,13 +450,13 @@ if __name__ == "__main__":
 
 	# 5. Generate Convex Hull and Eroded Convex Hull
 	hull = envelop_mesh.convex_hull
-	eroded_hull = scale_hull_xy(hull, offset=2.0)
+	eroded_hull = scale_hull_xy(hull, offset=2.5)
 
 	show_meshes_overlay(
 		[
 			(path_fine, "lightblue", 0.3),
 			(hull, "lightgreen", 0.3),
-			(eroded_hull, "darkorange", 1.0),
+			(eroded_hull, "darkorange", 0.5),
 		],
 		"Convex Hull and Eroded/Scaled Hull",
 	)
@@ -438,6 +478,7 @@ if __name__ == "__main__":
 	)
 	print("[6] Subtracted eroded convex hull from remeshed path file")
 
+	raise SystemExit
 	# Export the eroded subtraction result
 	eroded_difference_output_path = os.path.join(output_dir, "path_fine_minus_eroded_hull.stl")
 	# eroded_difference_result.export(eroded_difference_output_path)
