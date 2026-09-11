@@ -1,8 +1,8 @@
 import numpy as np
 import pyvista as pv
-import pymeshlab
 import trimesh
 import os
+from PreSlice import robust_boolean_intersection, show_meshes_overlay
 
 def trimesh_to_pyvista(mesh):
     """Convert a trimesh mesh to a PyVista surface mesh."""
@@ -93,31 +93,50 @@ def loft_between_boundary_loops(top_surface, bottom_surface, sample_count=128):
         ])
     return trimesh.Trimesh(vertices=vertices, faces=np.array(faces), process=False)
 
-def fuse_and_isotropic_remesh(meshes, target_length=0.25):
-    """Fuse component meshes and remesh the result at a uniform target length."""
-    if target_length <= 0:
-        raise ValueError("target_length must be greater than zero")
+def cap_boundary_loft(loft, sample_count=128):
+    """Close the loft with planar caps so it can be used as a boolean volume."""
+    top_ring = loft.vertices[:sample_count]
+    bottom_ring = loft.vertices[sample_count:2 * sample_count]
+    top_center = top_ring.mean(axis=0)
+    bottom_center = bottom_ring.mean(axis=0)
+    top_center_index = len(loft.vertices)
+    bottom_center_index = top_center_index + 1
+    vertices = np.vstack([loft.vertices, top_center, bottom_center])
+    faces = loft.faces.tolist()
 
-    fused_mesh = trimesh.util.concatenate(meshes)
-    fused_mesh.merge_vertices()
-    fused_mesh.remove_unreferenced_vertices()
+    for index in range(sample_count):
+        next_index = (index + 1) % sample_count
+        faces.append([top_center_index, next_index, index])
+        faces.append([
+            bottom_center_index,
+            sample_count + index,
+            sample_count + next_index,
+        ])
 
-    mesh_set = pymeshlab.MeshSet()
-    mesh_set.add_mesh(
-        pymeshlab.Mesh(
-            vertex_matrix=fused_mesh.vertices,
-            face_matrix=fused_mesh.faces,
-        )
+    capped = trimesh.Trimesh(
+        vertices=vertices,
+        faces=np.array(faces),
+        process=True,
     )
-    mesh_set.meshing_isotropic_explicit_remeshing(
-        targetlen=pymeshlab.PureValue(target_length),
-    )
-    remeshed_data = mesh_set.current_mesh()
-    return trimesh.Trimesh(
-        vertices=remeshed_data.vertex_matrix(),
-        faces=remeshed_data.face_matrix(),
-        process=False,
-    )
+    capped.remove_unreferenced_vertices()
+    capped.fix_normals()
+    return capped
+
+def scale_boundary_loft_xy(mesh, offset=2.0):
+    """Scale a boundary loft inward in X and Y by offset millimeters."""
+    scaled = mesh.copy()
+    vertices = scaled.vertices.copy()
+    bounds = scaled.bounds
+    extents_xy = bounds[1, :2] - bounds[0, :2]
+    scale_xy = (extents_xy - 2.0 * offset) / extents_xy
+    center_xy = (bounds[1, :2] + bounds[0, :2]) / 2.0
+    vertices[:, :2] = (vertices[:, :2] - center_xy) * scale_xy + center_xy
+    scaled.vertices = vertices
+    return scaled
+
+# The previous fusion and isotropic-remeshing experiment is intentionally disabled.
+# def fuse_and_isotropic_remesh(meshes, target_length=0.25):
+#     ...
 
 def display_mesh(mesh, title, color):
     plotter = pv.Plotter()
@@ -149,39 +168,76 @@ def display_boundary_loop_loft(surface_tolerance_mm=0.0, sample_count=128):
         bottom_surface,
         sample_count=sample_count,
     )
-    display_mesh(
+    offset_text = input("Enter XY scale offset in mm [2.0]: ").strip()
+    scale_offset_mm = 2.0 if not offset_text else float(offset_text)
+    scaled_boundary_loft = scale_boundary_loft_xy(
         boundary_loft,
-        "Boundary-Loop Loft (preserves extracted XY outlines)",
-        "gold",
+        offset=scale_offset_mm,
+    )
+    show_meshes_overlay(
+        [
+            (boundary_loft, "gold", 0.45),
+            (scaled_boundary_loft, "darkorange", 0.55),
+        ],
+        f"Boundary Loop and {scale_offset_mm:g} mm XY-Scaled Boundary Loop",
     )
 
-    fused_mesh = trimesh.util.concatenate([
+    # The previous fusion/remeshing experiment did not produce the expected result.
+    # fused_mesh = trimesh.util.concatenate([
+    #     top_surface,
+    #     bottom_surface,
+    #     boundary_loft,
+    # ])
+    # display_mesh(fused_mesh, "Fused Top, Bottom, and Boundary Surfaces", "steelblue")
+    # remeshed_mesh = fuse_and_isotropic_remesh(
+    #     [top_surface, bottom_surface, boundary_loft],
+    #     target_length=0.25,
+    # )
+    # display_mesh(
+    #     remeshed_mesh,
+    #     "Fused Surface After Isotropic Remesh (0.25 mm)",
+    #     "mediumseagreen",
+    # )
+
+    path_input_path = os.path.join(os.path.dirname(__file__), "input", "path.stl")
+    path_mesh = trimesh.load_mesh(path_input_path)
+    if not isinstance(path_mesh, trimesh.Trimesh) or len(path_mesh.vertices) == 0:
+        raise ValueError(f"Unable to load a non-empty mesh from {path_input_path}")
+    display_mesh(path_mesh, "Path Mesh", "cornflowerblue")
+
+    scaled_boundary_volume = cap_boundary_loft(
+        scaled_boundary_loft,
+        sample_count=sample_count,
+    )
+    if not scaled_boundary_volume.is_volume:
+        raise RuntimeError("Scaled boundary-loop loft is not a valid boolean volume")
+    path_inside_scaled_boundary = robust_boolean_intersection(
+        path_mesh,
+        scaled_boundary_volume,
+    )
+    display_mesh(
+        path_inside_scaled_boundary,
+        f"Path Inside {scale_offset_mm:g} mm XY-Scaled Boundary Loop",
+        "mediumseagreen",
+    )
+
+    output_dir = os.path.join(os.path.dirname(__file__), "output")
+    os.makedirs(output_dir, exist_ok=True)
+    boundary_loft.export(os.path.join(output_dir, "loft.stl"))
+    scaled_boundary_loft.export(os.path.join(output_dir, "loft_scaled_xy.stl"))
+    path_inside_scaled_boundary.export(
+        os.path.join(output_dir, "path_inside_scaled_boundary_loft.stl")
+    )
+
+    return (
+        mesh,
         top_surface,
         bottom_surface,
         boundary_loft,
-    ])
-    display_mesh(fused_mesh, "Fused Top, Bottom, and Boundary Surfaces", "steelblue")
-
-    remeshed_mesh = fuse_and_isotropic_remesh(
-        [top_surface, bottom_surface, boundary_loft],
-        target_length=0.25,
+        scaled_boundary_loft,
+        path_mesh,
+        path_inside_scaled_boundary,
     )
-    display_mesh(
-        remeshed_mesh,
-        "Fused Surface After Isotropic Remesh (0.25 mm)",
-        "mediumseagreen",
-    )
-    output_path = os.path.join(os.path.dirname(__file__), "output", "loft.stl")
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    boundary_loft.export(output_path)
-    remeshed_output_path = os.path.join(
-        os.path.dirname(__file__),
-        "output",
-        "loft_remeshed.stl",
-    )
-    remeshed_mesh.export(remeshed_output_path)
-
-    return mesh, top_surface, bottom_surface, boundary_loft, fused_mesh, remeshed_mesh
 
 if __name__ == "__main__":
     display_boundary_loop_loft()
