@@ -69,13 +69,28 @@ def boundary_loop(surface):
     return surface.vertices[loop]
 
 def resample_closed_loop(points, sample_count):
-    """Resample a closed 3D loop at equal XY perimeter intervals."""
-    closed = np.vstack([points, points[0]])
-    lengths = np.linalg.norm(np.diff(closed[:, :2], axis=0), axis=1)
-    distances = np.concatenate([[0.0], np.cumsum(lengths)])
-    samples = np.linspace(0.0, distances[-1], sample_count, endpoint=False)
+    """Resample a closed loop at equal angular steps about its own XY centroid.
+
+    Parameterizing by angle (instead of arc length) keeps corresponding
+    indices of the top and bottom loops radially aligned and consistently
+    wound, which is required to avoid twisted/self-intersecting side facets.
+    """
+    center_xy = points[:, :2].mean(axis=0)
+    angles = np.arctan2(points[:, 1] - center_xy[1], points[:, 0] - center_xy[0])
+    order = np.argsort(angles)
+    sorted_points = points[order]
+    sorted_angles = angles[order]
+
+    closed_points = np.vstack([sorted_points, sorted_points[0]])
+    closed_angles = np.concatenate([sorted_angles, [sorted_angles[0] + 2.0 * np.pi]])
+    sample_angles = np.linspace(
+        closed_angles[0],
+        closed_angles[0] + 2.0 * np.pi,
+        sample_count,
+        endpoint=False,
+    )
     return np.column_stack([
-        np.interp(samples, distances, closed[:, axis])
+        np.interp(sample_angles, closed_angles, closed_points[:, axis])
         for axis in range(3)
     ])
 

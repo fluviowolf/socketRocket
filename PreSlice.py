@@ -189,6 +189,130 @@ def scale_hull_xy(mesh, offset=1.0):
 	return scaled
 
 
+def extract_top_and_bottom_surfaces(mesh, tolerance_mm=0.0):
+	"""Extract faces lying exactly on the mesh's top and bottom Z planes."""
+	if tolerance_mm < 0:
+		raise ValueError("tolerance_mm must not be negative")
+
+	z_values = mesh.vertices[:, 2]
+	z_min = z_values.min()
+	z_max = z_values.max()
+	top_mask = np.all(mesh.vertices[mesh.faces, 2] >= z_max - tolerance_mm, axis=1)
+	bottom_mask = np.all(mesh.vertices[mesh.faces, 2] <= z_min + tolerance_mm, axis=1)
+
+	def build_surface(face_mask, name):
+		faces = mesh.faces[face_mask]
+		if len(faces) == 0:
+			raise ValueError(f"No faces found for the {name} surface")
+		surface = trimesh.Trimesh(
+			vertices=mesh.vertices.copy(),
+			faces=faces,
+			process=False,
+		)
+		surface.remove_unreferenced_vertices()
+		return surface
+
+	return build_surface(top_mask, "top"), build_surface(bottom_mask, "bottom")
+
+
+def boundary_loop(surface):
+	"""Return the ordered boundary loop of a surface mesh."""
+	face_edges = np.vstack([
+		surface.faces[:, [0, 1]],
+		surface.faces[:, [1, 2]],
+		surface.faces[:, [2, 0]],
+	])
+	undirected_edges = np.sort(face_edges, axis=1)
+	edges, counts = np.unique(undirected_edges, axis=0, return_counts=True)
+	boundary_edges = edges[counts == 1]
+	if len(boundary_edges) < 3:
+		raise ValueError("Surface does not contain a boundary loop")
+
+	neighbors = {}
+	for start, end in boundary_edges:
+		neighbors.setdefault(int(start), []).append(int(end))
+		neighbors.setdefault(int(end), []).append(int(start))
+	loop = [int(boundary_edges[0, 0])]
+	previous = None
+	current = loop[0]
+	while True:
+		candidates = [index for index in neighbors[current] if index != previous]
+		next_index = candidates[0]
+		if next_index == loop[0]:
+			break
+		loop.append(next_index)
+		previous, current = current, next_index
+		if len(loop) > len(boundary_edges):
+			raise ValueError("Could not order the surface boundary loop")
+	return surface.vertices[loop]
+
+
+def resample_closed_loop(points, sample_count):
+	"""Resample a closed loop at equal angular steps about its own XY centroid.
+
+	Parameterizing by angle (instead of arc length) keeps corresponding
+	indices of the top and bottom loops radially aligned and consistently
+	wound, which is required to avoid twisted/self-intersecting side facets.
+	"""
+	center_xy = points[:, :2].mean(axis=0)
+	angles = np.arctan2(points[:, 1] - center_xy[1], points[:, 0] - center_xy[0])
+	order = np.argsort(angles)
+	sorted_points = points[order]
+	sorted_angles = angles[order]
+
+	closed_points = np.vstack([sorted_points, sorted_points[0]])
+	closed_angles = np.concatenate([sorted_angles, [sorted_angles[0] + 2.0 * np.pi]])
+	sample_angles = np.linspace(
+		closed_angles[0],
+		closed_angles[0] + 2.0 * np.pi,
+		sample_count,
+		endpoint=False,
+	)
+	return np.column_stack([
+		np.interp(sample_angles, closed_angles, closed_points[:, axis])
+		for axis in range(3)
+	])
+
+
+def loft_between_boundary_loops(top_surface, bottom_surface, sample_count=128):
+	"""Loft the actual top and bottom surface boundary loops."""
+	top_loop = resample_closed_loop(boundary_loop(top_surface), sample_count)
+	bottom_loop = resample_closed_loop(boundary_loop(bottom_surface), sample_count)
+	vertices = np.vstack([top_loop, bottom_loop])
+	faces = []
+	for index in range(sample_count):
+		next_index = (index + 1) % sample_count
+		faces.extend([
+			[index, sample_count + index, next_index],
+			[next_index, sample_count + index, sample_count + next_index],
+		])
+	return trimesh.Trimesh(vertices=vertices, faces=np.array(faces), process=False)
+
+
+def cap_boundary_loft(loft, sample_count=128):
+	"""Close a boundary loft with planar caps for boolean operations."""
+	top_ring = loft.vertices[:sample_count]
+	bottom_ring = loft.vertices[sample_count:2 * sample_count]
+	vertices = np.vstack([
+		loft.vertices,
+		top_ring.mean(axis=0),
+		bottom_ring.mean(axis=0),
+	])
+	top_center = len(loft.vertices)
+	bottom_center = top_center + 1
+	faces = loft.faces.tolist()
+	for index in range(sample_count):
+		next_index = (index + 1) % sample_count
+		faces.extend([
+			[top_center, next_index, index],
+			[bottom_center, sample_count + index, sample_count + next_index],
+		])
+	capped = trimesh.Trimesh(vertices=vertices, faces=np.array(faces), process=True)
+	capped.remove_unreferenced_vertices()
+	capped.fix_normals()
+	return capped
+
+
 def voxel_dilate_mesh(mesh, offset_mm=2.0, pitch_mm=0.20):
 	"""Fill and dilate a mesh on a voxel grid by offset_mm, returning the voxel volume."""
 	if offset_mm < 0:
@@ -448,17 +572,40 @@ if __name__ == "__main__":
 	envelop_mesh.export(os.path.join(output_dir, "envelop.stl"))
 	print("[4] Generated envelop mesh (path - blank = envelop)")
 
-	# 5. Generate Convex Hull and Eroded Convex Hull
-	hull = envelop_mesh.convex_hull
+	# 5. Generate boundary loft and interactively select its scaled XY hull
+	# tolerance accounts for remeshing/boolean noise so top/bottom faces aren't perfectly flat
+	top_surface, bottom_surface = extract_top_and_bottom_surfaces(
+		envelop_mesh,
+		tolerance_mm=0.05,
+	)
+	show_meshes_overlay(
+		[
+			(top_surface, "cornflowerblue", 0.8),
+			(bottom_surface, "lightgreen", 0.8),
+		],
+		"Envelop Top and Bottom Surfaces",
+	)
+
+	boundary_loft = loft_between_boundary_loops(
+		top_surface,
+		bottom_surface,
+		sample_count=128,
+	)
+	show_mesh(boundary_loft, "Boundary Loop Surface", color="gold")
+
+	boundary_volume = cap_boundary_loft(boundary_loft, sample_count=128)
+	show_mesh(boundary_volume, "Capped Boundary Volume", color="darkgoldenrod")
+
 	erosion_offset_mm = 2.0
 	while True:
-		eroded_hull = scale_hull_xy(hull, offset=erosion_offset_mm)
+		eroded_hull = scale_hull_xy(boundary_volume, offset=erosion_offset_mm)
 		show_meshes_overlay(
 			[
-				(path_fine, "lightblue", 0.35),
-				(eroded_hull, "darkorange", 0.35),
+				(path_fine, "lightblue", 0.30),
+				(boundary_volume, "gold", 0.30),
+				(eroded_hull, "darkorange", 0.45),
 			],
-			f"Path and Eroded Hull ({erosion_offset_mm:.2f} mm)",
+			f"Boundary Hull and Eroded Hull ({erosion_offset_mm:.2f} mm)",
 		)
 
 		while True:
@@ -483,48 +630,37 @@ if __name__ == "__main__":
 				break
 			print("Invalid offset. Enter a positive number.")
 
-	hull_output_path = os.path.join(output_dir, "hull.stl")
-	eroded_hull_output_path = os.path.join(output_dir, "hull_eroded.stl")
-	hull.export(hull_output_path)
-	eroded_hull.export(eroded_hull_output_path)
-	print("[5] Generated convex hull from envelop and eroded convel hull")
+	boundary_loft.export(os.path.join(output_dir, "boundary_loft.stl"))
+	eroded_hull.export(os.path.join(output_dir, "hull_eroded.stl"))
+	print("[5] Generated boundary hull and selected eroded hull")
 
 	# 6. Boolean Subtraction of Path - Eroded Hull
-	eroded_difference_result = path_fine.difference(eroded_hull, engine="manifold")
-
-	# Display the eroded subtraction result
+	eroded_difference_result = robust_boolean_difference(path_fine, eroded_hull)
 	show_mesh(
 		eroded_difference_result,
-		"Path Minus Eroded/Scaled Hull",
+		"Path Minus Boundary Eroded Hull",
 		color="lightgreen",
 	)
-	print("[6] Subtracted eroded convex hull from remeshed path file")
-
-	# Export the eroded subtraction result
-	eroded_difference_output_path = os.path.join(output_dir, "path_fine_minus_eroded_hull.stl")
-	# eroded_difference_result.export(eroded_difference_output_path)
-	# print(f"Eroded boolean difference exported to: {eroded_difference_output_path}")
+	eroded_difference_result.export(
+		os.path.join(output_dir, "path_fine_minus_eroded_hull.stl")
+	)
+	print("[6] Subtracted boundary-based eroded hull from remeshed path file")
 
 	# 7. Boolean Intersection of Path and Eroded Hull
-	eroded_intersection_result = path_fine.intersection(eroded_hull, engine="manifold")
-
-	# Remove isolated islands, keeping only the largest component
-	eroded_intersection_result, _ = keep_largest_component(eroded_intersection_result)
-
-	# Display the eroded intersection result
+	eroded_intersection_result = robust_boolean_intersection(
+		path_fine,
+		eroded_hull,
+	)
 	show_mesh(
 		eroded_intersection_result,
-		"Implant Core",
+		"Implant Core from Boundary Eroded Hull",
 		color="darkorange",
 	)
-	print("[7] Determined the intersection geometry between the eroded convex hull and the remeshed path file")
+	eroded_intersection_result.export(
+		os.path.join(output_dir, "implant_core.stl")
+	)
+	print("[7] Determined the intersection geometry using the boundary-based eroded hull")
 
-	# Export the eroded intersection result
-	eroded_intersection_output_path = os.path.join(output_dir, "implant_core.stl")
-	# eroded_intersection_result.export(eroded_intersection_output_path)
-	# print(f"Eroded boolean intersection exported to: {eroded_intersection_output_path}")
-
-	raise SystemExit
 	# 8. Isotropic Remesh of Implant Core
 	remeshed_intersection_result = remesh_uniform(eroded_intersection_result, target_len=0.20)
 
@@ -578,16 +714,19 @@ if __name__ == "__main__":
 	# smooth_mesh_result.export(smooth_mesh_output_path)
 	print("[11] Laplacian smoothing of implant/target mesh")
 
+	# 11b. Clip dilated implant envelop to the blank so it cannot exceed the blank's height
+	implant_envelop_mesh = robust_boolean_intersection(smooth_mesh_result, blank_fine)
+
 	# 12. Final Boolean
 	outer_puck = blank_fine.difference(envelop_mesh, engine="manifold")
-	outer_puck = outer_puck.difference(smooth_mesh_result, engine="manifold")
-	inner_puck = envelop_mesh.difference(smooth_mesh_result, engine="manifold")
+	outer_puck = outer_puck.difference(implant_envelop_mesh, engine="manifold")
+	inner_puck = envelop_mesh.difference(implant_envelop_mesh, engine="manifold")
 
 	show_meshes_overlay(
 			[
 				(outer_puck, "lightblue", 0.5),
 				(inner_puck, "lightgreen", 0.2),
-				(smooth_mesh_result, "darkorange", 1.0),
+				(implant_envelop_mesh, "darkorange", 1.0),
 			],
 			"Final",
 	)
@@ -598,5 +737,5 @@ if __name__ == "__main__":
 	implant_envelop_output_path = os.path.join(output_dir, "implant_envelop.stl")
 	outer_puck.export(outer_puck_output_path)
 	inner_puck.export(inner_puck_output_path)
-	smooth_mesh_result.export(implant_envelop_output_path)
+	implant_envelop_mesh.export(implant_envelop_output_path)
 
