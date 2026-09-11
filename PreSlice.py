@@ -445,26 +445,48 @@ if __name__ == "__main__":
 		raise RuntimeError("Boolean difference produced an empty result mesh.")
 	envelop_mesh = cleanup_mesh(envelop_mesh)
 	show_mesh(envelop_mesh, "Envelop Mesh (Path - Blank)", color="lightgreen")
-	# envelop_mesh.export(os.path.join(output_dir, "envelop.stl"))
+	envelop_mesh.export(os.path.join(output_dir, "envelop.stl"))
 	print("[4] Generated envelop mesh (path - blank = envelop)")
 
 	# 5. Generate Convex Hull and Eroded Convex Hull
 	hull = envelop_mesh.convex_hull
-	eroded_hull = scale_hull_xy(hull, offset=2.5)
+	erosion_offset_mm = 2.0
+	while True:
+		eroded_hull = scale_hull_xy(hull, offset=erosion_offset_mm)
+		show_meshes_overlay(
+			[
+				(path_fine, "lightblue", 0.35),
+				(eroded_hull, "darkorange", 0.35),
+			],
+			f"Path and Eroded Hull ({erosion_offset_mm:.2f} mm)",
+		)
 
-	show_meshes_overlay(
-		[
-			(path_fine, "lightblue", 0.3),
-			(hull, "lightgreen", 0.3),
-			(eroded_hull, "darkorange", 0.5),
-		],
-		"Convex Hull and Eroded/Scaled Hull",
-	)
+		while True:
+			update_offset = input(
+				f"Erosion offset is {erosion_offset_mm:.2f} mm. Update? (Y/N): "
+			).strip().upper()
+			if update_offset in {"Y", "N"}:
+				break
+			print('Invalid input. Please enter "Y" or "N".')
+
+		if update_offset == "N":
+			break
+
+		while True:
+			try:
+				new_offset = float(input("Enter a positive erosion offset in mm: ").strip())
+			except ValueError:
+				print("Invalid offset. Enter a positive number.")
+				continue
+			if new_offset > 0:
+				erosion_offset_mm = new_offset
+				break
+			print("Invalid offset. Enter a positive number.")
 
 	hull_output_path = os.path.join(output_dir, "hull.stl")
 	eroded_hull_output_path = os.path.join(output_dir, "hull_eroded.stl")
-	# hull.export(hull_output_path)
-	# eroded_hull.export(eroded_hull_output_path)
+	hull.export(hull_output_path)
+	eroded_hull.export(eroded_hull_output_path)
 	print("[5] Generated convex hull from envelop and eroded convel hull")
 
 	# 6. Boolean Subtraction of Path - Eroded Hull
@@ -478,7 +500,6 @@ if __name__ == "__main__":
 	)
 	print("[6] Subtracted eroded convex hull from remeshed path file")
 
-	raise SystemExit
 	# Export the eroded subtraction result
 	eroded_difference_output_path = os.path.join(output_dir, "path_fine_minus_eroded_hull.stl")
 	# eroded_difference_result.export(eroded_difference_output_path)
@@ -503,6 +524,7 @@ if __name__ == "__main__":
 	# eroded_intersection_result.export(eroded_intersection_output_path)
 	# print(f"Eroded boolean intersection exported to: {eroded_intersection_output_path}")
 
+	raise SystemExit
 	# 8. Isotropic Remesh of Implant Core
 	remeshed_intersection_result = remesh_uniform(eroded_intersection_result, target_len=0.20)
 
