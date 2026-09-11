@@ -365,6 +365,12 @@ def robust_boolean_intersection(mesh_a, mesh_b):
 
 if __name__ == "__main__":
 
+	while True:
+		part_type = input('Enter "A" for Asymmetric or "S" for Symmetric: ').strip().upper()
+		if part_type in {"A", "S"}:
+			break
+		print('Invalid input. Please enter "A" or "S".')
+
     # 1. Upload Path and Blank Mesh Files
 	input_dir = os.path.join(os.getcwd(), "input")
 	output_dir = os.path.join(os.getcwd(), "output")
@@ -374,13 +380,16 @@ if __name__ == "__main__":
 	print("[1] Imported path and blank files")
 
     # 2. Plane cut 10 mm from the bottom of the path and blank meshes
-	plane_cut_height_mm = 10.0
-	path_mesh = plane_cut_from_bottom(path_mesh, height_mm=plane_cut_height_mm)
-	blank_mesh = plane_cut_from_bottom(blank_mesh, height_mm=plane_cut_height_mm)
+	if part_type == "A":
+		plane_cut_height_mm = 10.0
+		path_mesh = plane_cut_from_bottom(path_mesh, height_mm=plane_cut_height_mm)
+		blank_mesh = plane_cut_from_bottom(blank_mesh, height_mm=plane_cut_height_mm)
 
-	# show_mesh(path_mesh, "Path Mesh (Plane Cut)", color="cornflowerblue")
-	# show_mesh(blank_mesh, "Blank Mesh (Plane Cut)", color="lightgray")
-	print("[2] Reduced input path and blank by 10 mm")
+		# show_mesh(path_mesh, "Path Mesh (Plane Cut)", color="cornflowerblue")
+		# show_mesh(blank_mesh, "Blank Mesh (Plane Cut)", color="lightgray")
+		print("[2] Reduced input path and blank by 10 mm")
+	else:
+		print("[2] Skipped 10 mm plane cut for symmetric part")
 
     # 3 - Remesh path and blank meshes
 	path_fine = isotropic_remesh(path_mesh, os.path.join(output_dir, "path_fine.stl"), targetlen=1)
