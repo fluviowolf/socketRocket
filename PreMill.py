@@ -36,6 +36,7 @@ pv = ensure_module("pyvista")
 ensure_module("matplotlib")
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
+from scipy.spatial import ConvexHull
 from scipy.spatial.transform import Rotation
 
 
@@ -189,6 +190,76 @@ def centroid_xy_offset(mesh):
     return -xy_centroid[0], -xy_centroid[1]
 
 
+def _circle_from_two_points(p1, p2):
+    center = (p1 + p2) / 2.0
+    radius = np.linalg.norm(p1 - p2) / 2.0
+    return center, radius
+
+
+def _circle_from_three_points(p1, p2, p3):
+    ax, ay = p1
+    bx, by = p2
+    cx, cy = p3
+    d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-9:
+        # Colinear points have no circumscribed circle; fall back to the
+        # two-point circle spanning the farthest-apart pair.
+        pts = [p1, p2, p3]
+        farthest = max(
+            ((i, j) for i in range(3) for j in range(i + 1, 3)),
+            key=lambda ij: np.linalg.norm(pts[ij[0]] - pts[ij[1]]),
+        )
+        return _circle_from_two_points(pts[farthest[0]], pts[farthest[1]])
+    ux = (
+        (ax**2 + ay**2) * (by - cy)
+        + (bx**2 + by**2) * (cy - ay)
+        + (cx**2 + cy**2) * (ay - by)
+    ) / d
+    uy = (
+        (ax**2 + ay**2) * (cx - bx)
+        + (bx**2 + by**2) * (ax - cx)
+        + (cx**2 + cy**2) * (bx - ax)
+    ) / d
+    center = np.array([ux, uy])
+    radius = np.linalg.norm(center - p1)
+    return center, radius
+
+
+def _point_in_circle(point, center, radius, eps=1e-7):
+    return np.linalg.norm(point - center) <= radius + eps
+
+
+def minimum_enclosing_circle(points):
+    """Welzl's algorithm: the true smallest circle enclosing all 2D points.
+
+    Unlike optimize_xy_placement (which searches rotation/translation to
+    minimize the max radius from a circle forced to be centered at the
+    origin), this finds the globally smallest bounding circle regardless of
+    where its center ends up, using only 2-3 of the outermost points to
+    define it.
+    """
+    pts = np.asarray(points, dtype=float).copy()
+    rng = np.random.default_rng(0)
+    rng.shuffle(pts)
+
+    center = pts[0]
+    radius = 0.0
+    for i in range(1, len(pts)):
+        if _point_in_circle(pts[i], center, radius):
+            continue
+        center, radius = pts[i], 0.0
+        for j in range(i):
+            if _point_in_circle(pts[j], center, radius):
+                continue
+            center, radius = _circle_from_two_points(pts[i], pts[j])
+            for k in range(j):
+                if _point_in_circle(pts[k], center, radius):
+                    continue
+                center, radius = _circle_from_three_points(pts[i], pts[j], pts[k])
+
+    return center, radius
+
+
 if __name__ == "__main__":
 
     mesh = trimesh.load(os.path.join("input", "part.stl"))
@@ -254,20 +325,81 @@ if __name__ == "__main__":
     )
 
     # trimesh creates the cylinder centered at the global origin by default.
-    print(f"Enclosing cylinder diameter: {cylinder_diameter:.3f} mm")
-    print(f"Enclosing cylinder height: {cylinder_height} mm")
+    print(f"Old (origin-centered) cylinder diameter: {cylinder_diameter:.3f} mm")
+    print(f"Old (origin-centered) cylinder height: {cylinder_height} mm")
+
+    # Step 3b: True minimum-diameter cylinder from the smallest enclosing
+    # circle of the part's outermost XY points (post rotation, Steps 1-2).
+    # This circle need not be centered on the origin or the part centroid,
+    # since only the height (already optimized in Step 2) is shared with it.
+    xy_points = rotated_mesh.vertices[:, :2]
+    hull_points = xy_points[ConvexHull(xy_points).vertices]
+    mec_center, mec_radius = minimum_enclosing_circle(hull_points)
+
+    # Snug the new puck's height to the mesh's actual Z extent instead of
+    # the old symmetric-about-origin height, since it no longer shares the
+    # part's center. Use the exact (unrounded) extent so the cylinder's
+    # top/bottom faces land precisely on the mesh's highest/lowest points
+    # rather than being padded evenly on both sides by integer rounding.
+    z_min, z_max = rotated_mesh.vertices[:, 2].min(), rotated_mesh.vertices[:, 2].max()
+    mec_height = z_max - z_min
+    mec_z_center = (z_max + z_min) / 2.0
+
+    # Add a 1 mm clearance offset in every direction (+1 mm diameter,
+    # +1 mm height), then round the final puck dimensions up to the next
+    # whole millimeter.
+    puck_radius = mec_radius + 0.5
+    puck_height = mec_height + 1.0
+    puck_diameter = int(np.ceil(2.0 * puck_radius))
+    puck_height = int(np.ceil(puck_height))
+
+    optimized_cylinder = trimesh.creation.cylinder(
+        radius=puck_diameter / 2.0,
+        height=puck_height,
+        sections=128,
+    )
+    optimized_cylinder.apply_translation([mec_center[0], mec_center[1], mec_z_center])
+
+    print(f"New (min-enclosing-circle) puck diameter: {puck_diameter} mm")
+    print(f"New (min-enclosing-circle) puck height: {puck_height} mm")
+    print(
+        f"New cylinder center offset from origin: "
+        f"({mec_center[0]:.3f}, {mec_center[1]:.3f}, {mec_z_center:.3f}) mm"
+    )
 
     show_scene(
         [
             (cylinder, "lightgreen", 0.3),
+            (optimized_cylinder, "orange", 0.3),
             (rotated_mesh, "lightblue", 1.0),
         ],
-        "Part Enclosed by Minimum-Diameter Cylinder",
+        "Old Origin-Centered Cylinder (green) vs New Min-Enclosing Cylinder (orange)",
+    )
+
+    # Step 4: Recenter the new cylinder (and the part it encloses) so the
+    # cylinder's own center lands on the scene origin.
+    recenter_offset = [-mec_center[0], -mec_center[1], -mec_z_center]
+
+    pre_recenter_cylinder = optimized_cylinder.copy()
+    pre_recenter_mesh = rotated_mesh.copy()
+
+    optimized_cylinder.apply_translation(recenter_offset)
+    rotated_mesh.apply_translation(recenter_offset)
+
+    show_scene(
+        [
+            (pre_recenter_cylinder, "lightgray", 0.3),
+            (pre_recenter_mesh, "lightgray", 0.4),
+            (optimized_cylinder, "orange", 0.3),
+            (rotated_mesh, "lightblue", 1.0),
+        ],
+        "Step 4: Before (gray) and After (color) Recentering New Cylinder to Origin",
     )
 
     # Export the part after Z optimization only.
     rotated_mesh.export(os.path.join("output", "part_min_z.stl"))
 
-    # Export the enclosing cylinder.
+    # Export both enclosing cylinders.
     cylinder.export(os.path.join("output", "enclosing_cylinder.stl"))
+    optimized_cylinder.export(os.path.join("output", "enclosing_cylinder_optimized.stl"))
 
