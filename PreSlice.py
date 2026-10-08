@@ -5,8 +5,6 @@ import sys
 import threading
 import time
 from collections import Counter
-
-import numpy as np
 from trimesh.smoothing import filter_laplacian
 
 
@@ -38,6 +36,7 @@ def ensure_module(module_name, package_name=None):
 		return importlib.import_module(module_name)
 
 
+np = ensure_module("numpy")
 trimesh = ensure_module("trimesh")
 pv = ensure_module("pyvista")
 ensure_module("manifold3d")
