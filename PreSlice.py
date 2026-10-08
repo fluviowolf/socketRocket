@@ -231,19 +231,31 @@ def boundary_loop(surface):
 	for start, end in boundary_edges:
 		neighbors.setdefault(int(start), []).append(int(end))
 		neighbors.setdefault(int(end), []).append(int(start))
-	loop = [int(boundary_edges[0, 0])]
-	previous = None
-	current = loop[0]
-	while True:
-		candidates = [index for index in neighbors[current] if index != previous]
-		next_index = candidates[0]
-		if next_index == loop[0]:
-			break
-		loop.append(next_index)
-		previous, current = current, next_index
-		if len(loop) > len(boundary_edges):
-			raise ValueError("Could not order the surface boundary loop")
-	return surface.vertices[loop]
+	# Split boundary vertices into connected components and keep the outermost one.
+	# Ordering is not needed: resample_closed_loop sorts points by angle.
+	seen = set()
+	best_loop, best_area = None, -1.0
+	for seed in neighbors:
+		if seed in seen:
+			continue
+		component, stack = [], [seed]
+		seen.add(seed)
+		while stack:
+			node = stack.pop()
+			component.append(node)
+			for other in neighbors[node]:
+				if other not in seen:
+					seen.add(other)
+					stack.append(other)
+		if len(component) < 3:
+			continue
+		xy = surface.vertices[component][:, :2]
+		area = float(np.prod(xy.max(axis=0) - xy.min(axis=0)))
+		if area > best_area:
+			best_loop, best_area = component, area
+	if best_loop is None:
+		raise ValueError("Could not find the surface boundary loop")
+	return surface.vertices[best_loop]
 
 
 def resample_closed_loop(points, sample_count):
@@ -677,7 +689,7 @@ if __name__ == "__main__":
 	print("[8] Remeshed the intersection result or the implant/target mesh")
 
 	# 9. Voxel Conversion of Implant Core
-	voxel_dilated_result = voxel_dilate_mesh(remeshed_intersection_result, offset_mm=1.00)
+	voxel_dilated_result = voxel_dilate_mesh(remeshed_intersection_result, offset_mm=0.75)
 
 	#voxel_dilated_output_path = "implant_core_dilated.stl"
 	#voxel_dilated_result.export(voxel_dilated_output_path)
@@ -717,9 +729,15 @@ if __name__ == "__main__":
 	implant_envelop_mesh = robust_boolean_intersection(smooth_mesh_result, blank_fine)
 
 	# 12. Final Boolean
-	outer_puck = blank_fine.difference(envelop_mesh, engine="manifold")
-	outer_puck = outer_puck.difference(implant_envelop_mesh, engine="manifold")
-	inner_puck = envelop_mesh.difference(implant_envelop_mesh, engine="manifold")
+	try:
+		outer_puck = blank_fine.difference(envelop_mesh, engine="manifold")
+		outer_puck = outer_puck.difference(implant_envelop_mesh, engine="manifold")
+		inner_puck = envelop_mesh.difference(implant_envelop_mesh, engine="manifold")
+	except ValueError as exc:
+		raise SystemExit(
+			f"Final boolean failed ({exc}). The implant dilation (step 9, offset_mm) likely left an "
+			"infinitely thin edge on the envelop. Adjust the dilation factor and run again."
+		) from exc
 
 	show_meshes_overlay(
 			[
